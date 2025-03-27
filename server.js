@@ -23,6 +23,7 @@ client.on('error', (err) => console.log('Redis Client Error', err));
     console.log('Conectado ao Redis!');
 })();
 
+app.use(bodyParser.json()); // Para parsear o corpo da requisição como JSON
 app.use(cookieParser());
 app.use(express.json());
 app.use(cors({
@@ -57,10 +58,6 @@ const generateJWTToken = (user) => {
         }
     );
 };
-
-app.get('/teste', (req, res)=>{
-   return res.send('Acesso permitido');
-})
 
 app.get('/auth/github', (req, res)=>{
     const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&scope=user`
@@ -98,7 +95,9 @@ app.get('/auth/callback', async (req, res)=>{
 
         storeGHToken(GHToken, JWTtoken);
         
-        res.json({ JWTtoken, userData});
+        //res.json({ JWTtoken, userData});
+
+        res.redirect(`http://localhost:4200/auth-success?token=${JWTtoken}`);
 
     } catch (error) {
         console.error('Erro ao autenticar com GitHub:', error);
@@ -106,24 +105,8 @@ app.get('/auth/callback', async (req, res)=>{
     }
 });
 
-// Rota protegida que exige JWT
-app.get('/api/protected', (req, res) => {
-    const token = req.headers.authorization?.split(' ')[1]; // Pega o token do header
-
-    if (!token) {
-        return res.status(401).json({ error: 'Token não fornecido' });
-    }
-
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET); // Verifica o token
-        res.json({ message: 'Acesso permitido', user: decoded });
-    } catch (error) {
-        res.status(401).json({ error: 'Token inválido' });
-    }
-});
-
-//acessar api do github
-app.get('/api/repos', async (req, res) => {
+//acessar repositorios do github
+app.get('/get-repos', async (req, res) => {
     const tokenJWT = req.headers.authorization?.split(' ')[1];
 
     if (!tokenJWT) {
@@ -166,47 +149,55 @@ app.get('/api/repos', async (req, res) => {
     }
 });
 
-//POST
-app.use(bodyParser.json()); // Para parsear o corpo da requisição como JSON
-app.post('/api/create-repo', async (req, res) => {
-    const { repoName, description, private } = req.body; // Dados do repositório
+app.post('/repos', async (req, res) => {
+    const { name } = req.body;
     const JWTToken = req.headers.authorization?.split(' ')[1];
     const tokenGH = await getGHToken(JWTToken);
-    console.log(tokenGH)
-    if (!tokenGH) {
-        return res.status(401).json({ error: 'Token do GitHub não fornecido' });
+
+    if (!JWTToken) {
+        return res.status(401).json({ error: 'JWT não fornecido' });
     }
 
-    if (!repoName) {
-        return res.status(400).json({ error: 'Nome do repositório é obrigatório' });
+    if (!name) {
+        return res.status(400).json({ error: "O nome do repositório é obrigatório" });
     }
 
     try {
-        // Faz a requisição para a API do GitHub para criar o repositório
-        const response = await axios.post('https://api.github.com/user/repos', 
+        const response = await axios.post(
+            "https://api.github.com/user/repos",
             {
-                name: repoName,
-                description: description || '',
-                private: private || false,  // Pode ser true ou false
+                name: name,
+                private: false, // Defina como `true` se quiser um repositório privado
+                description: "Criado via API do GitHub com Express.js",
+                auto_init: true, // Cria automaticamente um README.md
             },
             {
                 headers: {
-                    Authorization: `Bearer ${tokenGH}`,
-                    'Content-Type': 'application/json',
+                    Authorization: `token ${tokenGH}`,
+                    Accept: "application/vnd.github.v3+json",
                 },
             }
         );
 
-        res.status(201).json({ message: 'Repositório criado com sucesso!', repo: response.data });
+        res.json({
+            message: "Repositório criado com sucesso!",
+            repo_url: response.data.html_url,
+        });
     } catch (error) {
-        console.error('erro create repos: ' + error);
-        res.status(500).json({ error: 'Erro ao criar o repositório no GitHub' });
+        console.error("Erro ao criar repositório:", error.response.data);
+        res.status(500).json({ error: "Erro ao criar repositório no git", details: error.response.data });
     }
 });
 
 app.get('/repos/favorites', async (req, res) => {
+    const tokenJWT = req.headers.authorization?.split(' ')[1];
+
+    if (!tokenJWT) {
+        return res.status(401).json({ error: 'tokenJWT não fornecido' });
+    }
+
     try {
-        const result = await pool.query('SELECT * FROM users_favs_repos');
+        const result = await pool.query(`SELECT repo_name AS name FROM users_favs_repos WHERE jwt_token ='${tokenJWT}'`);
         res.json(result.rows);
     } catch (error){
         console.error('Erro ao buscar favoritos:', error);
@@ -215,18 +206,23 @@ app.get('/repos/favorites', async (req, res) => {
 });
 
 app.post('/repos/favorite', async (req, res) => {
-    const { jwt_token, repository } = req.body;
+    const { repo_name } = req.body;
+    const tokenJWT = req.headers.authorization?.split(' ')[1];
 
-    if(!jwt_token || !repository) {
+    if (!tokenJWT) {
+        return res.status(401).json({ error: 'tokenJWT não fornecido' });
+    }
+
+    if(!repo_name) {
         return res.status(400).json({
-            error: 'jwt_token e repository são obrigatórios'
+            error: 'repo_name é obrigatório'
         });
     }
 
     try {
         const result = await pool.query(
-            'INSERT INTO users_favs_repos (jwt_token, repository) VALUES ($1, $2) RETURNING *',
-            [jwt_token, repository]
+            'INSERT INTO users_favs_repos (jwt_token, repo_name) VALUES ($1, $2) RETURNING *',
+            [tokenJWT, repo_name]
         );
         res.status(201).json({
             data: result.rows[0]
@@ -238,9 +234,5 @@ app.post('/repos/favorite', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`servidor rodando em http://localhost:${PORT}`)
-    console.log(`redirecionar ao github: http://localhost:${PORT}/auth/github`)
-    console.log(`repositorios: http://localhost:${PORT}/api/repos`)
-    console.log(`criar repo: http://localhost:${PORT}/api/create-repo`)
-    
+    console.log(`servidor rodando em http://localhost:${PORT}`);
 });
