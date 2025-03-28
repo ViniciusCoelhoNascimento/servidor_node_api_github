@@ -11,23 +11,23 @@ const app = express();
 const PORT = 3000;
 const client = redis.createClient({
     socket: {
-        host: '127.0.0.1', // IP do servidor Redis
-        port: 6379 // Porta padrão do Redis
+        host: '127.0.0.1',
+        port: 6379
     }
 });
 
 client.on('error', (err) => console.log('Redis Client Error', err));
 
 (async () => {
-    await client.connect(); // Conectar ao Redis
+    await client.connect();
     console.log('Conectado ao Redis!');
 })();
 
-app.use(bodyParser.json()); // Para parsear o corpo da requisição como JSON
+app.use(bodyParser.json());
 app.use(cookieParser());
 app.use(express.json());
 app.use(cors({
-    origin: '*'
+    origin: 'localhost'
 }));
 
 async function storeGHToken(gh_token, JWTToken) {
@@ -35,7 +35,7 @@ async function storeGHToken(gh_token, JWTToken) {
 }
 
 async function storeRepos(repos, JWTToken) {
-    await client.set(`repos_from:${JWTToken}`, repos, 'EX', 7200);
+    await client.set(`github_repos:${tokenGH}`, JSON.stringify(repos), 'EX', 7200);
 }
 
 async function getGHToken(JWTToken) {
@@ -43,7 +43,7 @@ async function getGHToken(JWTToken) {
 }
 
 async function getRepos(JWTToken) {
-    return await client.get(`repos_from:${JWTToken}`);
+    return await client.get(`github_repos:${tokenGH}`);
 }
 
 const generateJWTToken = (user) => {
@@ -94,8 +94,6 @@ app.get('/auth/callback', async (req, res)=>{
         const JWTtoken = generateJWTToken(userData);
 
         storeGHToken(GHToken, JWTtoken);
-        
-        //res.json({ JWTtoken, userData});
 
         res.redirect(`http://localhost:4200/auth-success?token=${JWTtoken}`);
 
@@ -105,7 +103,6 @@ app.get('/auth/callback', async (req, res)=>{
     }
 });
 
-//acessar repositorios do github
 app.get('/get-repos', async (req, res) => {
     const tokenJWT = req.headers.authorization?.split(' ')[1];
 
@@ -122,27 +119,20 @@ app.get('/get-repos', async (req, res) => {
     }
 
     try {
-        // 1️⃣ Tenta obter os repositórios do Redis
-        const cachedRepos = await client.get(`github_repos:${tokenGH}`);
+        const cachedRepos = await getRepos(tokenJWT);
 
         if (cachedRepos) {
-            console.log("🔵 Repositórios encontrados no cache.");
             return res.json(JSON.parse(cachedRepos));
         }
 
-        console.log("🔴 Repositórios não encontrados no cache. Buscando na API do GitHub...");
-
-        // 2️⃣ Se não estiver no cache, busca na API do GitHub
         const response = await axios.get('https://api.github.com/user/repos', {
             headers: { Authorization: `Bearer ${tokenGH}` }
         });
 
         const repos = response.data;
 
-        // 3️⃣ Armazena no Redis com expiração de 1 hora
-        await client.set(`github_repos:${tokenGH}`, JSON.stringify(repos), 'EX', 3600);
+        await storeRepos(repos, tokenJWT);
 
-        console.log("🟢 Repositórios armazenados no cache.");
         res.json(repos);
     } catch (error) {
         res.status(500).json({ error: 'Erro ao buscar repositórios' });
@@ -167,9 +157,9 @@ app.post('/repos', async (req, res) => {
             "https://api.github.com/user/repos",
             {
                 name: name,
-                private: false, // Defina como `true` se quiser um repositório privado
-                description: "Criado via API do GitHub com Express.js",
-                auto_init: true, // Cria automaticamente um README.md
+                private: false,
+                description: "Novo repositório",
+                auto_init: true,
             },
             {
                 headers: {
